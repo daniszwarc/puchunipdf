@@ -31,8 +31,6 @@ services:
       - traefik.http.routers.chatpdf.rule=Host(`puchunipdf.daniszwarc.cloud`)
       - traefik.http.routers.chatpdf.entrypoints=websecure
       - traefik.http.routers.chatpdf.tls.certresolver=mytlschallenge
-      - traefik.http.routers.chatpdf.middlewares=chatpdf-auth
-      - traefik.http.middlewares.chatpdf-auth.basicauth.users=${BASIC_AUTH_USERS:?set in .env}
       - traefik.http.services.chatpdf.loadbalancer.server.port=8000
 
 volumes:

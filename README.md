@@ -7,16 +7,16 @@ Stack: FastAPI, Postgres + pgvector, plain HTML/JS. LLM `qwen3.6` and embeddings
 ## Run locally
 
 ```sh
-cp .env.example .env        # fill NAN_API_KEY, POSTGRES_PASSWORD, BASIC_AUTH_USERS
+cp .env.example .env        # fill NAN_API_KEY, POSTGRES_PASSWORD
 docker network create n8n_default   # only if it doesn't exist (compose declares it external)
 docker compose up --build
 ```
 
-Open http://localhost:8000. (Basic auth only applies through Traefik, not on this local port.)
+Open http://localhost:8000.
 
 ## Production
 
-Same compose file on the VPS: Traefik routes `puchunipdf.daniszwarc.cloud` over the `n8n_default` network with the `mytlschallenge` resolver and a basicauth middleware fed by `BASIC_AUTH_USERS` (`htpasswd -nb user pass`, keep it single-quoted in `.env`).
+Same compose file on the VPS: Traefik routes `puchunipdf.daniszwarc.cloud` over the `n8n_default` network with the `mytlschallenge` resolver. There is no authentication in front of the app.
 
 ## NaN API settings
 
