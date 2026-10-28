@@ -1,0 +1,43 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chatpdf
+      POSTGRES_DB: chatpdf
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatpdf"]
+      interval: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NAN_API_KEY: ${NAN_API_KEY:?set in .env}
+      DATABASE_URL: postgresql://chatpdf:${POSTGRES_PASSWORD}@db:5432/chatpdf
+    ports:
+      - "127.0.0.1:8000:8000"  # local access; Traefik handles production
+    networks: [default, n8n_default]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=n8n_default
+      - traefik.http.routers.chatpdf.rule=Host(`puchunipdf.daniszwarc.cloud`)
+      - traefik.http.routers.chatpdf.entrypoints=websecure
+      - traefik.http.routers.chatpdf.tls.certresolver=mytlschallenge
+      - traefik.http.routers.chatpdf.middlewares=chatpdf-auth
+      - traefik.http.middlewares.chatpdf-auth.basicauth.users=${BASIC_AUTH_USERS:?set in .env}
+      - traefik.http.services.chatpdf.loadbalancer.server.port=8000
+
+volumes:
+  pgdata:
+
+networks:
+  n8n_default:
+    external: true

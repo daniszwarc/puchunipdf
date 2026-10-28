@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chatpdf</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<aside>
+  <h1>chatpdf</h1>
+  <label class="upload">+ Upload PDF<input id="file" type="file" accept="application/pdf" hidden></label>
+  <p id="status" role="status"></p>
+  <ul id="docs"></ul>
+</aside>
+<main>
+  <div id="log" aria-live="polite"><p class="hint">Select or upload a document, then ask a question.</p></div>
+  <form id="form">
+    <input id="q" placeholder="Ask about the document…" autocomplete="off" disabled>
+    <button disabled>Send</button>
+  </form>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
