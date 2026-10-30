@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 const box = $("viewer");
 const MAX_CANVAS_PX = 16e6; // cap canvas area so high zoom on retina doesn't exhaust memory
 let loading = null, pages = [], io = null, token = 0; // loading: the pdf.js loading task, which owns destroy()
-let zoom = 1, cur = 1, anchor = { n: 1, frac: 0 }, lastW = 0, pending = null;
+let zoom = 1, cur = 1, anchor = { n: 1, frac: 0 }, lastW = 0, pending = null, layer = null; // pending: {n, h} jump waiting for a hidden pane
 const visible = new Set();
 
 export const pageCount = () => pages.length;
@@ -24,6 +24,7 @@ function teardown() {
   loading?.destroy();
   loading = null;
   pending = null;
+  layer = null; // its page element is discarded with the pages
   cur = 1;
   anchor = { n: 1, frac: 0 };
   $("vbar").inert = true;
@@ -93,7 +94,7 @@ function relayout() {
   for (const n of visible) release(pages[n - 1]);
   const a = pages[anchor.n - 1];
   if (a) box.scrollTop = a.el.offsetTop + anchor.frac * a.el.offsetHeight;
-  if (pending) { const n = pending; pending = null; goTo(n, true); }
+  if (pending) { const q = pending; pending = null; goTo(q.n, true, q.h); }
   for (const n of [...visible]) render(pages[n - 1]);
   updateCurrent();
 }
@@ -154,14 +155,40 @@ function updateCurrent() {
 
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
-export function goTo(n, instant = false) {
+// One highlight at a time: yellow rectangles over the page, placed in percent of the page box so zoom, fit and resize keep them aligned.
+export function clearHighlight() {
+  layer?.remove();
+  layer = null;
+}
+
+function drawHighlight(el, h) {
+  clearHighlight();
+  layer = Object.assign(document.createElement("div"), { className: "hl-layer" });
+  for (const [x0, y0, x1, y1] of h.rects) {
+    const r = document.createElement("i");
+    r.style.cssText = `left:${(100 * x0) / h.width}%;top:${(100 * y0) / h.height}%;width:${(100 * (x1 - x0)) / h.width}%;height:${(100 * (y1 - y0)) / h.height}%`;
+    layer.append(r);
+  }
+  el.append(layer);
+}
+
+// h (optional): {page, width, height, rects} from a citation. The page is scrolled so the highlight is centered, then highlighted.
+export function goTo(n, instant = false, h = null) {
   if (!pages.length || !(n >= 1 && n <= pages.length)) return false;
   n = Math.round(n);
+  if (!h?.rects?.length) h = null;
   anchor = { n, frac: 0 }; // any re-fit from here on lands on the target instead of fighting the scroll
-  if (!box.clientWidth) { pending = n; return true; } // pane hidden: apply once shown
+  if (!box.clientWidth) { pending = { n, h }; return true; } // pane hidden: apply once shown
   if (refit()) instant = true; // pane just reappeared: fit it now, not on the next frame
   const el = pages[n - 1].el;
-  box.scrollTo({ top: el.offsetTop - 12, behavior: instant || reduceMotion.matches ? "auto" : "smooth" });
+  let top = el.offsetTop - 12;
+  if (h) {
+    const mid = (Math.min(...h.rects.map((r) => r[1])) + Math.max(...h.rects.map((r) => r[3]))) / 2;
+    top = el.offsetTop + (mid / h.height) * el.offsetHeight - box.clientHeight / 2;
+    anchor = { n, frac: (top - el.offsetTop) / el.offsetHeight };
+    drawHighlight(el, h);
+  }
+  box.scrollTo({ top, behavior: instant || reduceMotion.matches ? "auto" : "smooth" });
   el.classList.remove("flash");
   void el.offsetWidth;
   el.classList.add("flash");

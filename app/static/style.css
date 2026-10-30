@@ -39,7 +39,7 @@ small, .stat { color:var(--muted); font-size:12px; }
 #tabs { display:none; }
 #panes { flex:1; min-height:0; display:grid; grid-template-columns:55fr 45fr; }
 #docpane, #chatpane { min-width:0; min-height:0; display:flex; flex-direction:column; }
-#docpane { border-right:1px solid var(--line); background:var(--viewer); }
+#docpane { position:relative; border-right:1px solid var(--line); background:var(--viewer); }
 
 /* viewer */
 #vbar { flex:none; display:flex; align-items:center; gap:6px; padding:6px 12px; background:var(--bg); border-bottom:1px solid var(--line); }
@@ -53,6 +53,13 @@ small, .stat { color:var(--muted); font-size:12px; }
 .page canvas { display:block; width:100%; height:100%; }
 .page.flash { animation:flash 1.4s ease-out; }
 @keyframes flash { 0%, 55% { outline:3px solid var(--accent); outline-offset:3px; } 100% { outline:3px solid transparent; outline-offset:3px; } }
+
+/* citation highlight: rectangles in percent of the page box, multiplied over the canvas, then a short pulse */
+.hl-layer { position:absolute; inset:0; z-index:1; pointer-events:none; mix-blend-mode:multiply; animation:hl-pulse 1.3s ease-in-out .35s; }
+.hl-layer i { position:absolute; background:rgba(255,214,0,.62); border-radius:2px; }
+@keyframes hl-pulse { 0%, 100% { opacity:1; } 25%, 75% { opacity:.25; } 50% { opacity:1; } }
+@media (prefers-reduced-motion: reduce) { .hl-layer { animation:none; } }
+#toast { position:absolute; z-index:5; left:50%; bottom:16px; transform:translateX(-50%); max-width:calc(100% - 32px); padding:6px 12px; background:var(--card); border:1px solid var(--line); border-radius:6px; box-shadow:0 4px 14px rgba(0,0,0,.2); color:var(--muted); font-size:13px; pointer-events:none; }
 
 /* chat */
 #chathead { flex:none; display:flex; align-items:center; justify-content:space-between; padding:6px 20px; background:var(--bg); border-bottom:1px solid var(--line); color:var(--muted); font-size:13px; }

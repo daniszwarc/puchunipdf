@@ -71,7 +71,7 @@ def run(psycopg):
     # 2. the PDF really yields NUL when read raw (otherwise the test proves nothing)
     pdf = make_pdf(["Invoice total amount due for the month of March"])
     assert "\x00" in fitz.open(stream=pdf, filetype="pdf")[0].get_text(), "test PDF does not produce NUL"
-    text = ingest._text_layer(pdf)[0]
+    text = ingest._text_layer(pdf)[0][0]
     assert "\x00" not in text and "Invoice" in text, repr(text)
     print("ok extraction: raw text has NUL, extract_pages output does not")
 

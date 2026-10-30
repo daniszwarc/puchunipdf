@@ -146,9 +146,22 @@ $("delete").onclick = async () => {
 };
 
 // ---- answers ----
-function jump(n) {
+let toastTimer;
+function toast(text) {
+  $("toast").textContent = text;
+  $("toast").hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => ($("toast").hidden = true), 3500);
+}
+
+// h: the citation's highlight (rectangles of the supporting sentence) or null: then just jump and say so.
+function jump(n, h) {
   if (narrow.matches) setTab("doc");
-  requestAnimationFrame(() => viewer.goTo(n));
+  if (!h?.rects?.length) {
+    viewer.clearHighlight();
+    if (!busy) toast("Highlight not available for this citation"); // while streaming, highlights are not computed yet
+  }
+  requestAnimationFrame(() => viewer.goTo(n, false, h));
 }
 
 // Render text with [p. N] as a chip (jumps the viewer) plus a caret (toggles the source excerpt). textContent only.
@@ -161,7 +174,7 @@ function render(msg, text, sources) {
     if (!m) return msg.append(part);
     const n = +m[1];
     const chip = el("button", { type: "button", className: "cite", textContent: `p. ${n}` });
-    if (n >= 1 && n <= total) { chip.title = `Go to page ${n}`; chip.onclick = () => jump(n); }
+    if (n >= 1 && n <= total) { chip.title = `Go to page ${n}`; chip.onclick = () => jump(n, sources.find((s) => s.page === n)?.highlight); }
     else { chip.disabled = true; chip.title = total ? "Page not in this document" : "Original not available"; }
     const more = el("button", { type: "button", className: "cite-more", textContent: "▾", title: "Show source excerpt" });
     more.setAttribute("aria-label", `Show source excerpt for page ${n}`);
@@ -186,7 +199,7 @@ $("newchat").onclick = async () => {
   if (!docId || !confirm("Delete this conversation? New chat clears it for good.")) return;
   const id = docId;
   await api(`/api/documents/${id}/messages`, { method: "DELETE" });
-  if (docId === id) { answers = []; emptyHint(); }
+  if (docId === id) { answers = []; viewer.clearHighlight(); emptyHint(); }
 };
 
 function toggle(msg, btn, page, sources) {
@@ -232,6 +245,7 @@ $("form").onsubmit = async (e) => {
         buf = buf.slice(i + 2);
         const payload = JSON.parse(data);
         if (ev === "sources") sources = payload;
+        else if (ev === "citations") { sources = payload; render(ans, text, sources); } // adds each page's highlight
         else if (ev === "token") { text += payload; render(ans, text, sources); }
         else if (ev === "error") { ans._src = null; ans.classList.add("err"); ans.textContent = payload; }
         log.scrollTop = log.scrollHeight;

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import multiprocessing
 import os
 import tempfile
@@ -10,6 +11,7 @@ import fitz  # PyMuPDF
 
 import llm
 
+log = logging.getLogger("chatpdf")
 WORDS, OVERLAP, BATCH = 350, 40, 32  # ~500 tokens / ~50 overlap, using ~1.4 tokens per word
 MIN_CHARS = 25  # fewer non-whitespace chars than this on a page -> OCR it
 OCR_DPI = int(os.getenv("OCR_DPI", "200"))
@@ -34,16 +36,34 @@ def count_pages(data: bytes) -> int:
         return pdf.page_count
 
 
-def _text_layer(data: bytes) -> list[str]:
+def _geometry(page, textpage=None) -> tuple[float, float, list] | None:
+    """(width, height, words) of the page AS DISPLAYED, words = [x0, y0, x1, y1, text] in reading order (PDF points).
+    PyMuPDF reports word boxes unrotated, so /Rotate is applied here. None if the page has no words or extraction fails:
+    that page just gets no highlight."""
+    try:
+        words = []
+        for x0, y0, x1, y1, w, *_ in page.get_text("words", textpage=textpage):
+            w = clean(w).strip()
+            if w:
+                r = (fitz.Rect(x0, y0, x1, y1) * page.rotation_matrix).normalize()
+                words.append([round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1), w])
+        return (round(page.rect.width, 1), round(page.rect.height, 1), words) if words else None
+    except Exception:
+        log.warning("no word boxes for page %d", page.number + 1, exc_info=True)
+        return None
+
+
+def _text_layer(data: bytes) -> tuple[list[str], list]:
     with _fitz_lock, fitz.open(stream=data, filetype="pdf") as pdf:
-        return [clean(p.get_text()).strip() for p in pdf]
+        return [clean(p.get_text()).strip() for p in pdf], [_geometry(p) for p in pdf]
 
 
-def _ocr_page(path: str, index: int, dpi: int) -> str:
-    """Runs in a worker process (own PyMuPDF/Tesseract state)."""
+def _ocr_page(path: str, index: int, dpi: int) -> tuple[str, tuple | None]:
+    """Runs in a worker process (own PyMuPDF/Tesseract state). Text and word boxes come from one OCR pass."""
     with fitz.open(path) as pdf:
         page = pdf[index]
-        return clean(page.get_text(textpage=page.get_textpage_ocr(language="spa+fra+eng", dpi=dpi, full=True))).strip()
+        tp = page.get_textpage_ocr(language="spa+fra+eng", dpi=dpi, full=True)
+        return clean(page.get_text(textpage=tp)).strip(), _geometry(page, tp)
 
 
 def _ocr_pool() -> ProcessPoolExecutor:
@@ -54,10 +74,11 @@ def _ocr_pool() -> ProcessPoolExecutor:
     return _pool
 
 
-async def extract(data: bytes, on_progress) -> tuple[list[tuple[int, str]], int]:
-    """Return ([(page_number, text)], pages_recovered_by_ocr). on_progress(done, total) after each page."""
+async def extract(data: bytes, on_progress) -> tuple[list[tuple[int, str]], int, list]:
+    """Return ([(page_number, text)], pages_recovered_by_ocr, per-page (width, height, words) or None).
+    on_progress(done, total) after each page."""
     global _pool
-    texts = await asyncio.to_thread(_text_layer, data)
+    texts, geo = await asyncio.to_thread(_text_layer, data)
     total = len(texts)
     todo = [i for i, t in enumerate(texts) if len("".join(t.split())) < MIN_CHARS]
     if len(todo) > OCR_MAX_PAGES:
@@ -73,9 +94,9 @@ async def extract(data: bytes, on_progress) -> tuple[list[tuple[int, str]], int]
 
             async def one(i):
                 nonlocal done, ocr_used
-                text = await loop.run_in_executor(_ocr_pool(), _ocr_page, f.name, i, OCR_DPI)
+                text, g = await loop.run_in_executor(_ocr_pool(), _ocr_page, f.name, i, OCR_DPI)
                 if len("".join(text.split())) > len("".join(texts[i].split())):
-                    texts[i] = text
+                    texts[i], geo[i] = text, g  # the boxes follow whichever text is indexed
                     ocr_used += 1
                 done += 1
                 on_progress(done, total)
@@ -87,7 +108,7 @@ async def extract(data: bytes, on_progress) -> tuple[list[tuple[int, str]], int]
                     _pool = None
                     raise IngestError("OCR worker crashed (out of memory?), try again")
                 raise errors[0]
-    return list(enumerate(texts, 1)), ocr_used
+    return list(enumerate(texts, 1)), ocr_used, geo
 
 
 def chunk(pages: list[tuple[int, str]]) -> list[tuple[int, str]]:

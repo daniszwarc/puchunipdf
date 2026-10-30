@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
 import auth
+import highlight
 import ingest
 import llm
 
@@ -66,6 +67,10 @@ async def lifespan(_):
         await c.execute("""CREATE TABLE IF NOT EXISTS document_files (
             document_id uuid PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
             content bytea NOT NULL, size_bytes int NOT NULL, created_at timestamptz NOT NULL DEFAULT now())""")
+        await c.execute("""CREATE TABLE IF NOT EXISTS page_words (
+            document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            page int NOT NULL, width real NOT NULL, height real NOT NULL, words jsonb NOT NULL,
+            PRIMARY KEY (document_id, page))""")
         await c.execute(auth.USERS_DDL)
         await c.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
             id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -109,7 +114,7 @@ async def list_documents():
 async def index_document(doc_id: str, data: bytes):
     error = None
     try:
-        pages, ocr_pages = await ingest.extract(data, lambda done, total: progress.__setitem__(doc_id, (done, total)))
+        pages, ocr_pages, geo = await ingest.extract(data, lambda done, total: progress.__setitem__(doc_id, (done, total)))
         chunks = ingest.chunk(pages)
         if not chunks:
             raise ingest.IngestError("No text found in the document, even after OCR")
@@ -119,6 +124,9 @@ async def index_document(doc_id: str, data: bytes):
                 await c.executemany(
                     "INSERT INTO chunks (document_id, page, content, embedding) VALUES (%s, %s, %s, %s)",
                     [(doc_id, p, t, Vector(v)) for (p, t), v in zip(chunks, vectors)])
+                await c.executemany(
+                    "INSERT INTO page_words (document_id, page, width, height, words) VALUES (%s, %s, %s, %s, %s)",
+                    [(doc_id, n, g[0], g[1], Jsonb(g[2])) for n, g in enumerate(geo, 1) if g])
             await conn.execute("UPDATE documents SET status = 'ready', ocr_pages = %s WHERE id = %s", (ocr_pages, doc_id))
     except (ingest.IngestError, llm.NaNError) as e:
         error = str(e)
@@ -212,10 +220,35 @@ async def clear_messages(doc_id: uuid.UUID, request: Request):
     return Response(status_code=204)
 
 
-async def save_turn(uid: int, doc_id: str, question: str, answer: str, rows: list):
-    """Question and complete answer go in together, so a failed or cut stream leaves nothing behind."""
+async def build_citations(doc_id: str, answer: str, rows: list) -> list:
+    """One entry per cited page that was retrieved: {page, text, highlight}. highlight is null when the page has no
+    word boxes (older documents) or no sentence matches well enough. Never raises: the answer matters more."""
     cited = sorted({int(n) for n in CITE.findall(answer)})
-    citations = [{"page": p, "text": "\n…\n".join(t for pg, t in rows if pg == p)} for p in cited if any(pg == p for pg, _ in rows)]
+    pages = [p for p in cited if any(pg == p for pg, _ in rows)]
+    geo = {}
+    try:
+        if pages:
+            async with db() as conn:
+                cur = await conn.execute(
+                    "SELECT page, width, height, words FROM page_words WHERE document_id = %s AND page = ANY(%s)", (doc_id, pages))
+                geo = {p: (round(w, 1), round(h, 1), words) for p, w, h, words in await cur.fetchall()}  # real -> float32 noise
+    except Exception:
+        log.exception("could not read page_words")
+    out = []
+    for p in pages:
+        chunks = [t for pg, t in rows if pg == p]
+        hl = None
+        if p in geo:
+            try:
+                hl = await asyncio.to_thread(highlight.for_citation, answer, p, chunks, *geo[p])
+            except Exception:
+                log.exception("highlight for page %d failed", p)
+        out.append({"page": p, "text": "\n…\n".join(chunks), "highlight": hl})
+    return out
+
+
+async def save_turn(uid: int, doc_id: str, question: str, answer: str, citations: list):
+    """Question and complete answer go in together, so a failed or cut stream leaves nothing behind."""
     try:
         async with db() as conn:
             await conn.execute(
@@ -263,7 +296,9 @@ async def chat(body: ChatIn, request: Request):
                 answer += tok
                 yield sse("token", tok)
             if answer:
-                await save_turn(uid, body.document_id, q, answer, rows)
+                citations = await build_citations(body.document_id, answer, rows)
+                await save_turn(uid, body.document_id, q, answer, citations)
+                yield sse("citations", citations)
             else:
                 yield sse("error", "The model returned an empty answer. Please try again.")
         except llm.NaNError as e:
