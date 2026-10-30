@@ -4,3 +4,5 @@ psycopg[binary]
 pgvector
 PyMuPDF
 httpx
+argon2-cffi
+itsdangerous

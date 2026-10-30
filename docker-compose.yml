@@ -19,6 +19,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    env_file: .env  # all app settings; `environment:` below takes precedence
     environment:
       NAN_API_KEY: ${NAN_API_KEY:?set in .env}
       DATABASE_URL: postgresql://chatpdf:${POSTGRES_PASSWORD}@db:5432/chatpdf

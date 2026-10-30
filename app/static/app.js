@@ -1,68 +1,164 @@
+import * as viewer from "./viewer.js";
+
 const $ = (id) => document.getElementById(id);
-let docId = null;
+const el = (tag, props = {}) => Object.assign(document.createElement(tag), props);
+let docId = null, docs = [], busy = false, timer = null, answers = [];
+const narrow = matchMedia("(max-width: 899px)");
+const OCR_TIP = "Text recognized from scanned pages, may contain errors";
+
+// fetch wrapper: an expired session sends the user to the login page.
+async function api(...args) {
+  const r = await fetch(...args);
+  if (r.status === 401) { location.href = "/login"; throw new Error("not authenticated"); }
+  return r;
+}
+// Chips depend on the page count: redraw answers once the viewer has (re)loaded.
+document.addEventListener("viewer-ready", () => answers.forEach((m) => m._src && render(m, ...m._src)));
+$("logout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.href = "/login"; };
+
+// ---- tabs (narrow screens) ----
+function setTab(tab) {
+  document.body.dataset.tab = tab;
+  document.querySelectorAll("#tabs [role=tab]").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === tab));
+}
+document.querySelectorAll("#tabs [role=tab]").forEach((b) => (b.onclick = () => setTab(b.dataset.tab)));
+
+// ---- documents ----
+const sel = () => docs.find((d) => d.id === docId);
+const noteOf = (d) => d.status === "indexing" ? `Indexing page ${d.done_pages} of ${d.total_pages}`
+  : d.status === "failed" ? d.error || "Indexing failed" : "";
+
+// Chat is only enabled for the selected document once it is ready (and not mid-answer).
+function syncChat() {
+  const d = sel();
+  $("q").disabled = $("form").querySelector("button").disabled = d?.status !== "ready" || busy;
+  $("q").placeholder = !d ? "Select a document to start" : d.status === "ready" ? "Ask about the document…" : noteOf(d) + (d.status === "indexing" ? "…" : "");
+}
+
+function summary(d, withPages) {
+  const parts = [el("span", { className: "name", textContent: d.name, title: d.name })];
+  if (withPages) parts.push(el("small", { textContent: `${d.pages}p` }));
+  if (d.ocr_pages > 0) parts.push(el("span", { className: "badge", textContent: "OCR", title: OCR_TIP }));
+  const note = noteOf(d);
+  if (note) parts.push(el("span", { className: "stat" + (d.status === "failed" ? " err" : ""), textContent: note }));
+  return parts;
+}
+
+function renderPicker() {
+  const d = sel();
+  $("picker-btn").replaceChildren(...(d ? summary(d, false) : [el("span", { className: "name", textContent: "Select a document" })]));
+  $("delete").disabled = !d;
+  $("docs").replaceChildren(...(docs.length ? docs.map((x) => {
+    const li = el("li", { tabIndex: 0 });
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", x.id === docId);
+    li.append(...summary(x, true));
+    li.onclick = () => { closePicker(); select(x.id); };
+    li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); li.onclick(); } };
+    return li;
+  }) : [el("li", { className: "empty", textContent: "No documents yet. Upload a PDF." })]));
+}
+
+function closePicker() {
+  $("docs").hidden = true;
+  $("picker-btn").setAttribute("aria-expanded", "false");
+}
+$("picker-btn").onclick = () => {
+  const open = $("docs").hidden;
+  $("docs").hidden = !open;
+  $("picker-btn").setAttribute("aria-expanded", open);
+  if (open) $("docs").querySelector("li[aria-selected=true], li")?.focus();
+};
+document.addEventListener("click", (e) => { if (!e.target.closest("#picker")) closePicker(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("docs").hidden) { closePicker(); $("picker-btn").focus(); } });
 
 async function loadDocs() {
-  const docs = await (await fetch("/api/documents")).json();
-  $("docs").replaceChildren(...docs.map((d) => {
-    const li = document.createElement("li");
-    li.className = d.id === docId ? "sel" : "";
-    const name = Object.assign(document.createElement("span"), { textContent: d.name, title: d.name });
-    const pages = Object.assign(document.createElement("small"), { textContent: `${d.pages}p` });
-    const del = Object.assign(document.createElement("button"), { textContent: "×", title: "Delete", ariaLabel: "Delete " + d.name });
-    del.onclick = async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Delete "${d.name}"?`)) return;
-      await fetch(`/api/documents/${d.id}`, { method: "DELETE" });
-      if (docId === d.id) select(null);
-      loadDocs();
-    };
-    li.onclick = () => { select(d.id); loadDocs(); };
-    li.append(name, pages, del);
-    return li;
-  }));
+  clearTimeout(timer);
+  try {
+    docs = await (await api("/api/documents")).json();
+  } catch {
+    if (docs.some((d) => d.status === "indexing")) timer = setTimeout(loadDocs, 2000);
+    return;
+  }
+  renderPicker();
+  syncChat();
+  if (docs.some((d) => d.status === "indexing")) timer = setTimeout(loadDocs, 2000);
 }
 
 function select(id) {
   docId = id;
-  $("q").disabled = $("form").querySelector("button").disabled = !id;
+  answers = [];
   $("log").replaceChildren();
+  viewer.open(id ? () => api(`/api/documents/${id}/file`) : null);
+  if (id && narrow.matches) setTab("doc");
+  renderPicker();
+  syncChat();
 }
 
+$("upload").onclick = () => $("file").click();
 $("file").onchange = async (e) => {
   const f = e.target.files[0];
   e.target.value = "";
   if (!f) return;
-  $("status").textContent = `Indexing ${f.name}…`;
-  const r = await fetch("/api/documents?name=" + encodeURIComponent(f.name), { method: "POST", body: f });
-  if (r.ok) { const d = await r.json(); $("status").textContent = ""; select(d.id); }
-  else $("status").textContent = (await r.json().catch(() => ({}))).detail || "Upload failed";
+  $("status").textContent = `Uploading ${f.name}…`;
+  const r = await api("/api/documents?name=" + encodeURIComponent(f.name), { method: "POST", body: f });
+  if (r.ok) {
+    const d = await r.json();
+    $("status").textContent = "";
+    await loadDocs();
+    select(d.id);
+  } else {
+    $("status").textContent = (await r.json().catch(() => ({}))).detail || "Upload failed";
+  }
+};
+
+$("delete").onclick = async () => {
+  const d = sel();
+  if (!d || !confirm(`Delete "${d.name}"?`)) return;
+  await api(`/api/documents/${d.id}`, { method: "DELETE" });
+  select(null);
   loadDocs();
 };
 
-// Render text with [p. N] as buttons that toggle the matching source snippets. Uses textContent only.
-function render(el, text, sources) {
-  el.replaceChildren();
+// ---- answers ----
+function jump(n) {
+  if (narrow.matches) setTab("doc");
+  requestAnimationFrame(() => viewer.goTo(n));
+}
+
+// Render text with [p. N] as a chip (jumps the viewer) plus a caret (toggles the source excerpt). textContent only.
+function render(msg, text, sources) {
+  msg.replaceChildren();
+  msg._src = [text, sources];
+  const total = viewer.pageCount();
   text.split(/(\[p\.\s*\d+\])/).forEach((part) => {
     const m = part.match(/^\[p\.\s*(\d+)\]$/);
-    if (!m) return el.append(part);
-    const btn = Object.assign(document.createElement("button"), { className: "cite", textContent: `p. ${m[1]}` });
-    btn.onclick = () => toggle(el, btn, +m[1], sources);
-    el.append(btn);
+    if (!m) return msg.append(part);
+    const n = +m[1];
+    const chip = el("button", { type: "button", className: "cite", textContent: `p. ${n}` });
+    if (n >= 1 && n <= total) { chip.title = `Go to page ${n}`; chip.onclick = () => jump(n); }
+    else { chip.disabled = true; chip.title = total ? "Page not in this document" : "Original not available"; }
+    const more = el("button", { type: "button", className: "cite-more", textContent: "▾", title: "Show source excerpt" });
+    more.setAttribute("aria-label", `Show source excerpt for page ${n}`);
+    more.onclick = () => toggle(msg, more, n, sources);
+    const group = el("span", { className: "cite-group" });
+    group.append(chip, more);
+    msg.append(group);
   });
 }
 
-function toggle(el, btn, page, sources) {
+function toggle(msg, btn, page, sources) {
   const key = "snip" + page;
-  const open = el.parentNode.querySelector(`[data-k="${key}"]`);
+  const open = msg.parentNode.querySelector(`[data-k="${key}"]`);
   btn.classList.toggle("open", !open);
   if (open) return open.remove();
   const texts = sources.filter((s) => s.page === page).map((s) => s.text);
-  const box = Object.assign(document.createElement("div"), {
+  const box = el("div", {
     className: "snippet",
     textContent: texts.length ? texts.join("\n…\n") : "This page was not among the retrieved excerpts.",
   });
   box.dataset.k = key;
-  el.after(box);
+  msg.after(box);
 }
 
 $("form").onsubmit = async (e) => {
@@ -71,13 +167,15 @@ $("form").onsubmit = async (e) => {
   if (!q || !docId) return;
   $("q").value = "";
   const log = $("log");
-  log.append(Object.assign(document.createElement("div"), { className: "msg user", textContent: q }));
-  const ans = Object.assign(document.createElement("div"), { className: "msg" });
+  log.append(el("div", { className: "msg user", textContent: q }));
+  const ans = el("div", { className: "msg" });
   log.append(ans);
-  $("form").querySelector("button").disabled = true;
+  answers.push(ans);
+  busy = true;
+  syncChat();
   let text = "", sources = [];
   try {
-    const r = await fetch("/api/chat", {
+    const r = await api("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ document_id: docId, question: q }),
     });
@@ -103,7 +201,8 @@ $("form").onsubmit = async (e) => {
     ans.classList.add("err");
     ans.textContent = err.message;
   }
-  $("form").querySelector("button").disabled = false;
+  busy = false;
+  syncChat();
   $("q").focus();
 };
 
