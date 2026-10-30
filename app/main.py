@@ -3,6 +3,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 
@@ -12,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pgvector import Vector
 from pgvector.psycopg import register_vector_async
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -25,6 +27,8 @@ if len(SECRET_KEY) < 32:
     raise RuntimeError("SECRET_KEY must be set to at least 32 characters (generate: openssl rand -hex 32)")
 MAX_PDF = 50 * 1024 * 1024
 TOP_K = 8
+HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "8"))
+CITE = re.compile(r"\[p\.\s*(\d+)\]")
 log = logging.getLogger("chatpdf")
 progress: dict[str, tuple[int, int]] = {}  # doc id -> (done_pages, total_pages), while indexing
 
@@ -63,6 +67,12 @@ async def lifespan(_):
             document_id uuid PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
             content bytea NOT NULL, size_bytes int NOT NULL, created_at timestamptz NOT NULL DEFAULT now())""")
         await c.execute(auth.USERS_DDL)
+        await c.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
+            id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            role text NOT NULL CHECK (role IN ('user', 'assistant')), content text NOT NULL,
+            citations jsonb, created_at timestamptz NOT NULL DEFAULT now())""")
+        await c.execute("CREATE INDEX IF NOT EXISTS chat_messages_idx ON chat_messages(user_id, document_id, created_at)")
         await c.execute("UPDATE documents SET status = 'failed', error = 'interrupted, upload again' WHERE status = 'indexing'")
     log.info("embedding dimension: %d", dim)
     yield
@@ -176,12 +186,60 @@ def sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+async def current_user(conn, request: Request) -> int:
+    cur = await conn.execute("SELECT id FROM users WHERE username = %s", (request.session.get("user"),))
+    row = await cur.fetchone()
+    if not row:
+        raise HTTPException(401, "not authenticated")
+    return row[0]
+
+
+@app.get("/api/documents/{doc_id}/messages")
+async def get_messages(doc_id: uuid.UUID, request: Request):
+    async with db() as conn:
+        uid = await current_user(conn, request)
+        cur = await conn.execute(
+            "SELECT role, content, citations FROM chat_messages WHERE user_id = %s AND document_id = %s ORDER BY created_at, id",
+            (uid, str(doc_id)))
+        return [{"role": r, "content": c, "citations": cit or []} for r, c, cit in await cur.fetchall()]
+
+
+@app.delete("/api/documents/{doc_id}/messages", status_code=204)
+async def clear_messages(doc_id: uuid.UUID, request: Request):
+    async with db() as conn:
+        uid = await current_user(conn, request)
+        await conn.execute("DELETE FROM chat_messages WHERE user_id = %s AND document_id = %s", (uid, str(doc_id)))
+    return Response(status_code=204)
+
+
+async def save_turn(uid: int, doc_id: str, question: str, answer: str, rows: list):
+    """Question and complete answer go in together, so a failed or cut stream leaves nothing behind."""
+    cited = sorted({int(n) for n in CITE.findall(answer)})
+    citations = [{"page": p, "text": "\n…\n".join(t for pg, t in rows if pg == p)} for p in cited if any(pg == p for pg, _ in rows)]
+    try:
+        async with db() as conn:
+            await conn.execute(
+                "INSERT INTO chat_messages (user_id, document_id, role, content, citations) VALUES "
+                "(%s, %s, 'user', %s, NULL), (%s, %s, 'assistant', %s, %s)",
+                (uid, doc_id, ingest.clean(question), uid, doc_id, ingest.clean(answer), Jsonb(citations)))
+    except Exception:
+        log.exception("could not save the conversation turn")
+
+
 @app.post("/api/chat")
-async def chat(body: ChatIn):
+async def chat(body: ChatIn, request: Request):
     q = body.question.strip()
     if not q:
         raise HTTPException(400, "Empty question")
-    qvec = Vector((await llm.embed([q]))[0])
+    async with db() as conn:
+        uid = await current_user(conn, request)
+        cur = await conn.execute(
+            "SELECT role, content FROM (SELECT id, role, content FROM chat_messages WHERE user_id = %s AND document_id = %s "
+            "ORDER BY id DESC LIMIT %s) t ORDER BY id", (uid, body.document_id, 2 * HISTORY_TURNS))
+        history = [{"role": r, "content": c} for r, c in await cur.fetchall()]
+    # The standalone rewrite is for retrieval only; the model answers the user's original wording.
+    search_q = await llm.rewrite(history, q) if history else q
+    qvec = Vector((await llm.embed([search_q]))[0])
     async with db() as conn:
         cur = await conn.execute(
             "SELECT page, content FROM chunks WHERE document_id = %s ORDER BY embedding <=> %s LIMIT %s",
@@ -190,21 +248,23 @@ async def chat(body: ChatIn):
     if not rows:
         raise HTTPException(404, "Document not found")
     context = "\n\n".join(f"[p. {p}]\n{t}" for p, t in rows)
-    messages = [{"role": "system", "content": SYSTEM},
+    messages = [{"role": "system", "content": SYSTEM}, *history,
                 {"role": "user", "content": f"<context>\n{context}\n</context>\n\nQuestion: {q}"}]
 
     async def stream():
         yield sse("sources", [{"page": p, "text": t} for p, t in rows])
-        started = False
+        answer = ""
         try:
             async for tok in llm.chat(messages):
-                if not started:
+                if not answer:
                     tok = tok.lstrip()
                     if not tok:
                         continue
-                    started = True
+                answer += tok
                 yield sse("token", tok)
-            if not started:
+            if answer:
+                await save_turn(uid, body.document_id, q, answer, rows)
+            else:
                 yield sse("error", "The model returned an empty answer. Please try again.")
         except llm.NaNError as e:
             yield sse("error", str(e))

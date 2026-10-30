@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 import os
+import re
 
 import httpx
 
@@ -12,6 +14,7 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "qwen3-embedding")
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "none")
 CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "8000"))
 MAX_ATTEMPTS = 4
+log = logging.getLogger("chatpdf")
 ERRORS = {401: "NaN API key invalid", 402: "NaN token quota exhausted for this model", 404: "model id not found"}
 
 
@@ -91,5 +94,30 @@ async def chat(messages: list[dict]):
     if buf and not thinking:
         emitted = True
         yield buf
-    if finish == "length" and not emitted:
-        raise NaNError("Answer budget exhausted while reasoning: raise CHAT_MAX_TOKENS or lower REASONING_EFFORT")
+    if finish == "length":  # never present a cut-off answer as complete (it would also be saved to the history)
+        raise NaNError("Answer cut off at the token limit: raise CHAT_MAX_TOKENS" if emitted else
+                       "Answer budget exhausted while reasoning: raise CHAT_MAX_TOKENS or lower REASONING_EFFORT")
+
+
+REWRITE_SYSTEM = ("Rewrite the user's latest question as a standalone question that can be understood without the "
+                  "conversation. Keep the question's language. Add no new facts. Return only the question.")
+
+
+async def rewrite(history: list[dict], question: str) -> str:
+    """Standalone version of `question`, for retrieval only. Any failure silently returns the original."""
+    transcript = "\n".join(f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:500]}" for m in history)
+    body = {"model": CHAT_MODEL, "stream": False, "max_tokens": 256, "temperature": 0, "reasoning_effort": "none",
+            "messages": [{"role": "system", "content": REWRITE_SYSTEM},
+                         {"role": "user", "content": f"Conversation:\n{transcript}\n\nLatest question: {question}\n\nStandalone question:"}]}
+    try:
+        async with httpx.AsyncClient(base_url=BASE, headers=HEADERS, timeout=httpx.Timeout(30)) as c:
+            r = await _open(c, "/chat/completions", body)
+            try:
+                await r.aread()
+                text = r.json()["choices"][0]["message"]["content"]
+            finally:
+                await r.aclose()
+        return re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).strip()[:1000] or question
+    except Exception as e:
+        log.warning("question rewrite failed, using the original: %s", e)
+        return question

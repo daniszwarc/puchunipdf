@@ -41,6 +41,15 @@ The page is a document viewer (left, ~55%) and the chat (right, ~45%). On screen
 - **Documents uploaded before this feature have no original.** The viewer shows "Original not stored for this document. Upload it again to view it."; chat on them keeps working.
 - Not vendored: pdf.js CMaps and standard font data. Rare PDFs that rely on predefined CJK CMaps or non-embedded standard fonts may render with substitute fonts.
 
+## Conversation memory
+
+Each user's conversation with each document is saved in Postgres (table `chat_messages`, per user and document) and reloaded when you select the document again. Documents stay shared, conversations do not: you only ever see your own. **New chat** (top of the chat pane) deletes your conversation for that document for good; deleting a document deletes everyone's messages for it.
+
+- The last `CHAT_HISTORY_TURNS` turns (default 8) are sent to the model as earlier user and assistant messages. Answers still come only from the fragments retrieved for the new question, and the fragments themselves are never stored (only the question, the answer and the pages it cites, with their excerpts).
+- For follow-ups ("and the second one?"), one extra short non-streaming call to `CHAT_MODEL` (reasoning off, temperature 0) rewrites the question into a standalone one. It is used only to search the document; the model still answers your original wording. If that call fails, the original question is used. The first question of a conversation makes no extra call.
+- A turn is saved only after the answer finishes. If the stream fails, is cut off, or hits `CHAT_MAX_TOKENS`, nothing is saved and an error is shown.
+- The NaN key allows 60 requests per minute and 5 concurrent: follow-ups cost two chat calls (rewrite + answer) plus one embedding call.
+
 ## Authentication
 
 Username + password (argon2), signed session cookie (HttpOnly, SameSite=Lax, `Secure` unless `COOKIE_SECURE=false`, 30 days). Everything except `/login`, `POST /api/login` and `/health` needs a session: API calls get 401, pages redirect to `/login`. POST/DELETE requests with a mismatching `Origin` get 403. After 5 failed logins for the same client IP + username, that pair gets 429 for 15 minutes (in memory: resets on restart). The client IP comes from `X-Forwarded-For`, trusted only from `172.16.0.0/12` (uvicorn `--forwarded-allow-ips` in the Dockerfile): adjust if your Traefik network uses another range.

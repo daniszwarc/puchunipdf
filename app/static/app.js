@@ -32,6 +32,7 @@ const noteOf = (d) => d.status === "indexing" ? `Indexing page ${d.done_pages} o
 function syncChat() {
   const d = sel();
   $("q").disabled = $("form").querySelector("button").disabled = d?.status !== "ready" || busy;
+  $("newchat").disabled = !d || busy;
   $("q").placeholder = !d ? "Select a document to start" : d.status === "ready" ? "Ask about the document…" : noteOf(d) + (d.status === "indexing" ? "…" : "");
 }
 
@@ -85,10 +86,34 @@ async function loadDocs() {
   if (docs.some((d) => d.status === "indexing")) timer = setTimeout(loadDocs, 2000);
 }
 
+let loadTok = 0;
+
+function emptyHint() {
+  $("log").replaceChildren(el("p", {
+    className: "hint",
+    textContent: docId ? "Ask anything about this document. Your conversation is saved, only you can see it, and New chat deletes it."
+      : "Select or upload a document, then ask a question.",
+  }));
+}
+
+// Saved conversation of the current user for this document (never mixed: ignore stale responses).
+async function loadChat(id, my) {
+  try {
+    const r = await api(`/api/documents/${id}/messages`);
+    if (!r.ok || my !== loadTok) return;
+    const msgs = await r.json();
+    if (my !== loadTok || !msgs.length || $("log").querySelector(".msg")) return;
+    msgs.forEach((m) => addMsg(m.role, m.content, m.citations));
+    $("log").scrollTop = $("log").scrollHeight;
+  } catch { /* the empty state stays */ }
+}
+
 function select(id) {
   docId = id;
   answers = [];
-  $("log").replaceChildren();
+  const my = ++loadTok;
+  emptyHint();
+  if (id) loadChat(id, my);
   viewer.open(id ? () => api(`/api/documents/${id}/file`) : null);
   if (id && narrow.matches) setTab("doc");
   renderPicker();
@@ -147,6 +172,23 @@ function render(msg, text, sources) {
   });
 }
 
+function addMsg(role, content, citations) {
+  const log = $("log");
+  log.querySelector(".hint")?.remove();
+  const m = el("div", { className: "msg" + (role === "user" ? " user" : "") });
+  log.append(m);
+  if (role === "user") m.textContent = content;
+  else { answers.push(m); render(m, content, citations || []); }
+  return m;
+}
+
+$("newchat").onclick = async () => {
+  if (!docId || !confirm("Delete this conversation? New chat clears it for good.")) return;
+  const id = docId;
+  await api(`/api/documents/${id}/messages`, { method: "DELETE" });
+  if (docId === id) { answers = []; emptyHint(); }
+};
+
 function toggle(msg, btn, page, sources) {
   const key = "snip" + page;
   const open = msg.parentNode.querySelector(`[data-k="${key}"]`);
@@ -167,10 +209,8 @@ $("form").onsubmit = async (e) => {
   if (!q || !docId) return;
   $("q").value = "";
   const log = $("log");
-  log.append(el("div", { className: "msg user", textContent: q }));
-  const ans = el("div", { className: "msg" });
-  log.append(ans);
-  answers.push(ans);
+  addMsg("user", q);
+  const ans = addMsg("assistant", "");
   busy = true;
   syncChat();
   let text = "", sources = [];
@@ -193,11 +233,12 @@ $("form").onsubmit = async (e) => {
         const payload = JSON.parse(data);
         if (ev === "sources") sources = payload;
         else if (ev === "token") { text += payload; render(ans, text, sources); }
-        else if (ev === "error") { ans.classList.add("err"); ans.textContent = payload; }
+        else if (ev === "error") { ans._src = null; ans.classList.add("err"); ans.textContent = payload; }
         log.scrollTop = log.scrollHeight;
       }
     }
   } catch (err) {
+    ans._src = null;
     ans.classList.add("err");
     ans.textContent = err.message;
   }

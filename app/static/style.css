@@ -55,6 +55,10 @@ small, .stat { color:var(--muted); font-size:12px; }
 @keyframes flash { 0%, 55% { outline:3px solid var(--accent); outline-offset:3px; } 100% { outline:3px solid transparent; outline-offset:3px; } }
 
 /* chat */
+#chathead { flex:none; display:flex; align-items:center; justify-content:space-between; padding:6px 20px; background:var(--bg); border-bottom:1px solid var(--line); color:var(--muted); font-size:13px; }
+#newchat { padding:4px 12px; border:1px solid var(--line); border-radius:6px; background:var(--card); cursor:pointer; }
+#newchat:hover:not(:disabled) { border-color:var(--accent); }
+#newchat:disabled { opacity:.45; cursor:not-allowed; }
 #log { flex:1; min-height:0; overflow-y:auto; padding:16px 20px; }
 .msg { max-width:720px; margin:0 0 16px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .msg.user { font-weight:600; }
