@@ -103,7 +103,7 @@ async function loadChat(id, my) {
     if (!r.ok || my !== loadTok) return;
     const msgs = await r.json();
     if (my !== loadTok || !msgs.length || $("log").querySelector(".msg")) return;
-    msgs.forEach((m) => addMsg(m.role, m.content, m.citations));
+    msgs.forEach((m) => addMsg(m.role, m.content, m.citations, m.ungrounded));
     $("log").scrollTop = $("log").scrollHeight;
   } catch { /* the empty state stays */ }
 }
@@ -183,15 +183,16 @@ function render(msg, text, sources) {
     group.append(chip, more);
     msg.append(group);
   });
+  if (msg._ung?.length) msg.append(el("div", { className: "ground-note", textContent: `Names not found in the excerpts: ${msg._ung.join(", ")}. Check them in the document.` }));
 }
 
-function addMsg(role, content, citations) {
+function addMsg(role, content, citations, ungrounded) {
   const log = $("log");
   log.querySelector(".hint")?.remove();
   const m = el("div", { className: "msg" + (role === "user" ? " user" : "") });
   log.append(m);
   if (role === "user") m.textContent = content;
-  else { answers.push(m); render(m, content, citations || []); }
+  else { answers.push(m); m._ung = ungrounded; render(m, content, citations || []); }
   return m;
 }
 
@@ -246,6 +247,7 @@ $("form").onsubmit = async (e) => {
         const payload = JSON.parse(data);
         if (ev === "sources") sources = payload;
         else if (ev === "citations") { sources = payload; render(ans, text, sources); } // adds each page's highlight
+        else if (ev === "grounding") { ans._ung = payload; render(ans, text, sources); } // amber note under the answer
         else if (ev === "token") { text += payload; render(ans, text, sources); }
         else if (ev === "error") { ans._src = null; ans.classList.add("err"); ans.textContent = payload; }
         log.scrollTop = log.scrollHeight;

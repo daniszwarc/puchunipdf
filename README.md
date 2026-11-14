@@ -63,6 +63,20 @@ Limits:
 - Scanned pages depend on OCR quality: misread words reduce coverage, and very noisy pages may get no highlight.
 - Rectangles are positioned as percentages of the page box, so zoom, fit width and resize keep them aligned without recomputation.
 
+## Name check
+
+The system prompt tells the model that names of people, authors, works, organizations, dates and figures may appear in an answer only if they appear in the excerpts, and that a name must never be completed from general knowledge (a bibliography entry "ILLOUZ E." must not become "Eva Illouz"). Because a prompt is not a guarantee, `app/grounding.py` also checks the finished answer: it extracts capitalized names (runs of capitalized words such as "Eva Illouz" or "Ministerio de Educación", and acronyms of 3+ letters), and looks for every word of each name in the retrieved excerpts, ignoring case and accents. Names with a word that is nowhere in the excerpts are listed in an amber note under the message ("Names not found in the excerpts: Eva Illouz. Check them in the document."). No note when the list is empty.
+
+How it travels: after `citations`, the chat stream sends one `grounding` event (a list of names, possibly empty). The list is stored in `chat_messages.ungrounded` next to the citations, so the note comes back when the conversation is reloaded; messages saved before this feature simply have none.
+
+**It is a hint, not a verdict.** It does not block, rewrite or correct anything, and it only looks at names: dates and figures are in the prompt rule but not checked. Limits:
+
+- **Invented ideas, claims and attributions are not detected.** If the model puts a real name from the excerpts next to something that name never said, nothing is flagged.
+- **Translated proper nouns are over-flagged.** The answer is written in the language of the question, so "Francia" against an excerpt that says "France" (or "Alemania"/"Allemagne", "Nueva York"/"New York") is flagged by mistake. This is accepted: the note is a hint, and a false flag costs one glance at the document.
+- **A name that only appears in your question is not flagged** (you introduced it), and the check uses only this turn's excerpts: a name carried over from an earlier answer but absent from the new excerpts is flagged.
+- **A single capitalized word at the start of a sentence is skipped**, because Spanish, French and English capitalize ordinary sentence openers ("Según", "Además"). "Illouz sostiene…" is not checked; "Eva Illouz sostiene…" and "…dice Illouz…" are. Leading openers such as "Según" are ignored.
+- **Short or common names can be missed or over-flagged**: a surname that also appears in the excerpts as an ordinary word counts as present; a capitalized common word in mid-sentence (a concept, a title) can be flagged. Lower-case names, OCR errors in the excerpts ("lllouz") and names in languages written without capitals are not handled.
+
 ## Conversation memory
 
 Each user's conversation with each document is saved in Postgres (table `chat_messages`, per user and document) and reloaded when you select the document again. Documents stay shared, conversations do not: you only ever see your own. **New chat** (top of the chat pane) deletes your conversation for that document for good; deleting a document deletes everyone's messages for it.
@@ -109,7 +123,7 @@ The first image build is slower and the image larger because it installs Tessera
 | `GET /api/documents` | list with `status` (`indexing`/`ready`/`failed`), `ocr_pages`, `error`, and `done_pages`/`total_pages` while indexing |
 | `GET /api/documents/{id}/file` | the original PDF (`application/pdf`, inline, `Cache-Control: private`); 404 if not stored |
 | `DELETE /api/documents/{id}` | delete document, its chunks and its stored original |
-| `POST /api/chat` | `{document_id, question}` → SSE events `sources` (retrieved chunks), `token`, `citations` (one `{page, text, highlight}` per cited page, after the answer), `error`, `done` |
+| `POST /api/chat` | `{document_id, question}` → SSE events `sources` (retrieved chunks), `token`, `citations` (one `{page, text, highlight}` per cited page, after the answer), `grounding` (names not found in the excerpts, see Name check), `error`, `done` |
 
 ## Notes
 
