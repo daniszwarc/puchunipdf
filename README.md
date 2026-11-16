@@ -72,10 +72,29 @@ How it travels: after `citations`, the chat stream sends one `grounding` event (
 **It is a hint, not a verdict.** It does not block, rewrite or correct anything, and it only looks at names: dates and figures are in the prompt rule but not checked. Limits:
 
 - **Invented ideas, claims and attributions are not detected.** If the model puts a real name from the excerpts next to something that name never said, nothing is flagged.
-- **Translated proper nouns are over-flagged.** The answer is written in the language of the question, so "Francia" against an excerpt that says "France" (or "Alemania"/"Allemagne", "Nueva York"/"New York") is flagged by mistake. This is accepted: the note is a hint, and a false flag costs one glance at the document.
+- **Answers in another language than the document are not checked at all.** Names are compared word by word, so "Estados Unidos" can never match "United States", and a Spanish question about an English PDF used to list nine false names ("América del Norte", "Capítulo", "Solución de Controversias"…). So when the answer and the excerpts are clearly in different languages, `grounding.py` returns nothing: no note, the same event with an empty list, the same stored shape. The consequence is the remaining gap: **an invented name in an answer written in another language than the document is not caught.** There is no notice either (it would need a new event and a change in `app.js`).
+- **How the language is decided.** Each text (the answer; all excerpts joined) is scored with small lists of function words for Spanish, French and English. A language wins only with at least 5 hits and at least 70% of all hits. Otherwise it is "undetermined" and the check runs exactly as before: short answers, no excerpts, excerpts that are only a list of names, and mixed excerpts (half English, half Spanish). A Spanish paragraph with one French bibliography line is still Spanish (12 of 14 hits), so "Eva Illouz" against "ILLOUZ E." is still flagged there; a document that is mostly French bibliography would be detected as French and skipped for a Spanish answer. Other languages are not detected and are checked as before.
+- **Rejected: checking partial overlaps across languages.** Flagging only names where some words are in the excerpts and others are not (the "Eva Illouz" pattern) would also flag "América del Norte" ("america" is in "North America", "norte" is not) and "Acuerdo de Libre Comercio de América del Norte", which brings back the false alarms this rule removes.
 - **A name that only appears in your question is not flagged** (you introduced it), and the check uses only this turn's excerpts: a name carried over from an earlier answer but absent from the new excerpts is flagged.
 - **A single capitalized word at the start of a sentence is skipped**, because Spanish, French and English capitalize ordinary sentence openers ("Según", "Además"). "Illouz sostiene…" is not checked; "Eva Illouz sostiene…" and "…dice Illouz…" are. Leading openers such as "Según" are ignored.
 - **Short or common names can be missed or over-flagged**: a surname that also appears in the excerpts as an ordinary word counts as present; a capitalized common word in mid-sentence (a concept, a title) can be flagged. Lower-case names, OCR errors in the excerpts ("lllouz") and names in languages written without capitals are not handled.
+
+## How retrieval works
+
+Each question goes through two searches over the chunks of the open document, and the results are merged:
+
+1. **Vector search** (unchanged): the 8 chunks closest to the question's embedding (`TOP_K = 8`).
+2. **Keyword search** ([app/keywords.py](app/keywords.py)): literal words of the question matched against the chunk text, ignoring case and accents (Postgres `unaccent`). It exists because a short chunk such as a table of contents is not always near a question like "¿me pasarías el índice del libro?" in embedding space.
+
+Keyword details:
+- Generic words (the es/fr/en stopword list of the highlighter, e.g. "me", "el", "del") are dropped, so that question searches "pasarias", "indice", "libro". Words found in no chunk of the document are ignored, and rarer words weigh more (`ln(chunks / chunks containing the word)`): "índice" in 1 chunk counts far more than "libro" in 50, and a word in every chunk counts 0.
+- A word of 4+ letters matches the start of a word ("indice" also finds "indices"); shorter ones match whole words only.
+- The top **3** chunks are kept, and only those scoring at least half of the best one. Ties are broken by page ascending, so the result is deterministic.
+- If every word is a stopword, or no word matches, the keyword search adds nothing and the excerpts are exactly the vector ones, in the same order.
+- Merge: reciprocal rank fusion (`1/(60+rank)` per list). The final list is capped at **10** excerpts (8 vector + at most 2 more), so a keyword hit displaces at most the weakest vector chunks, never more context than +25%.
+- The keyword search is a per-query scan of one document's chunks (no index, no new column, nothing to re-embed). If the `unaccent` extension cannot be created at startup, or the keyword query fails, the app logs a warning and answers with vector search only.
+
+Limits: no stemming or synonyms ("indices" in the question does not match "índice" in the text, "indexar" does not match either), no typo tolerance, and a document that never uses the user's word cannot be found by it. Model re-ranking and query rewriting are not part of this.
 
 ## Conversation memory
 

@@ -21,6 +21,7 @@ import auth
 import grounding
 import highlight
 import ingest
+import keywords
 import llm
 
 DSN = os.environ["DATABASE_URL"]
@@ -55,6 +56,10 @@ async def lifespan(_):
     dim = len((await llm.embed(["dimension probe"]))[0])  # real call decides the column size
     async with await psycopg.AsyncConnection.connect(DSN, autocommit=True) as c:
         await c.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        try:  # keyword channel; autocommit, so a failure here cannot abort the statements below
+            await c.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
+        except Exception:
+            log.warning("unaccent extension unavailable: retrieval is vector-only", exc_info=True)
         await c.execute("""CREATE TABLE IF NOT EXISTS documents (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text NOT NULL,
             pages int NOT NULL, created_at timestamptz NOT NULL DEFAULT now())""")
@@ -283,6 +288,13 @@ async def chat(body: ChatIn, request: Request):
         rows = await cur.fetchall()
     if not rows:
         raise HTTPException(404, "Document not found")
+    try:  # separate connection: a failure (e.g. no unaccent) must not touch the vector result
+        async with db() as conn:
+            kw = await keywords.search(conn, body.document_id, search_q)
+    except Exception:
+        log.warning("keyword search failed, using vector results only", exc_info=True)
+        kw = []
+    rows = keywords.fuse(rows, kw)
     context = "\n\n".join(f"[p. {p}]\n{t}" for p, t in rows)
     messages = [{"role": "system", "content": SYSTEM}, *history,
                 {"role": "user", "content": f"<context>\n{context}\n</context>\n\nQuestion: {q}"}]
